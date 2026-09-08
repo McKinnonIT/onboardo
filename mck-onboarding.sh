@@ -10,7 +10,7 @@
 # WHAT IT DOES
 #   1. Installs swiftDialog if it isn't already present.
 #   2. Shows a branded welcome screen.
-#   3. Runs quick enrolment/Dock checks silently, then shows a minimal
+#   3. Runs a quick enrolment check silently, then shows a minimal
 #      app-install page (plain status list, pulsing progress bar) gated
 #      on both apps landing in /Applications, rechecked every 3s.
 #   4. Downloads the info PDF from this repo straight to the user's
@@ -49,9 +49,10 @@
 #      PDF_SOURCE_URL (this repo, raw.githubusercontent.com) at runtime,
 #      so first login needs working internet for that step to succeed.
 #      It fails soft (logs a warning, carries on) if it can't reach it.
-#   2. Also ship the swiftDialog pkg, or let the script self-install it
-#      (it will, the first time it runs, but that adds a delay to first
-#      login — pre-installing it separately is smoother).
+#   2. swiftDialog itself should be pushed as a managed app via Mosyle
+#      too, so it's already installed before first login. The script
+#      can self-install it if it's somehow still missing, but that adds
+#      a delay to the student's first login.
 #   3. launchd loads the LaunchAgent at the user's next login and runs the
 #      script in their session. RunAtLoad + LimitLoadToSessionType=Aqua
 #      means it only fires once per login, and only into a real GUI
@@ -59,8 +60,6 @@
 #   4. The marker file (guard above) and the LaunchAgent self-cleanup
 #      (step 7 above) both exist so a stray reload or repeat login never
 #      re-runs onboarding — belt and braces.
-#   - Swap the placeholder STEP commands below for your real fleet scripts
-#     (dockutil config, profilecleaner, admin cleanup, etc).
 #
 # ------------------------------------------------------------------------
 
@@ -198,8 +197,7 @@ fi
 ### SILENT PRE-CHECKS
 ###
 ### Quick, non-gating steps — logged only, not shown on screen, so they
-### don't clutter the app-install page below. Swap the placeholder Dock
-### command for your real dockutil script.
+### don't clutter the app-install page below.
 ### ---------------------------------------------------------------------
 
 ANY_FAILED=false
@@ -209,14 +207,6 @@ if profiles status -type enrollment | grep -q 'MDM enrollment: Yes'; then
   log "Step succeeded: Checking enrolment status"
 else
   log "Step FAILED: Checking enrolment status"
-  ANY_FAILED=true
-fi
-
-log "Running step: Applying Dock layout"
-if sleep 2 && true; then   # placeholder for your dockutil script
-  log "Step succeeded: Applying Dock layout"
-else
-  log "Step FAILED: Applying Dock layout"
   ANY_FAILED=true
 fi
 
