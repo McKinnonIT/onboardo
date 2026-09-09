@@ -153,11 +153,32 @@ done
 ### ---------------------------------------------------------------------
 ### LOGGING
 ### ---------------------------------------------------------------------
+#
+# Every log() call goes to two places: the plain-text LOG_FILE (as
+# before), and the unified logging system via `logger`, tagged
+# "com.mckinnonsc.onboarding" — so runs, actions, and errors all show up
+# live in Console.app or `log stream`/`log show`, without needing to know
+# the log file's path (which differs depending on RUNNING_AS_ROOT) or
+# have filesystem access to it at all.
+#
+# Deliberately NOT using `logger -p user.err` etc. for errors — tested
+# directly against this system's unified log and confirmed err/warning/
+# notice/crit all render as the same plain "Default" type as everything
+# else, while "info" priority renders as a real "Info" type that
+# Console.app and `log show` HIDE by default. Using it for errors would
+# make them look identical to routine output; using it for routine
+# output would make routine output invisible by default. Everything logs
+# at the same (default/"notice") priority instead, and errors are found
+# by searching for the existing "ERROR:"/"WARNING:"/"FAILED" message
+# text, which is reliable and doesn't depend on log-type rendering.
 
+LOGGER_TAG="com.mckinnonsc.onboarding"
 mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null
 
 log() {
-  echo "$(date '+%Y-%m-%d %H:%M:%S') | $1" | tee -a "$LOG_FILE"
+  local message="$1"
+  echo "$(date '+%Y-%m-%d %H:%M:%S') | $message" | tee -a "$LOG_FILE"
+  logger -t "$LOGGER_TAG" "$message"
 }
 
 ### ---------------------------------------------------------------------
