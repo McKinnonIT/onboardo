@@ -7,6 +7,15 @@
 # any Mosyle-specific APIs, so you can test it standalone on any test Mac
 # before wiring it into a Custom Command / policy.
 #
+# IMPORTANT — this script runs as ROOT when you test it with `sudo`, but
+# as the STANDARD, LOGGED-IN USER (never root) when the companion
+# LaunchAgent fires it at first login — that's just how LaunchAgents work,
+# regardless of who owns the plist file. RUNNING_AS_ROOT below branches on
+# this everywhere it matters (log/marker file locations, chown, sudo -u,
+# swiftDialog self-install). If you add a new step that writes to disk or
+# needs elevated privilege, it needs the same branch — a standard user has
+# no write access to /Library or /var/log, and no sudo.
+#
 # WHAT IT DOES
 #   1. Installs swiftDialog if it isn't already present.
 #   2. Shows a branded welcome screen.
@@ -66,6 +75,31 @@
 set -u
 
 ### ---------------------------------------------------------------------
+### EXECUTION CONTEXT
+###
+### This script runs in one of two genuinely different contexts, and a
+### lot of bugs have come from conflating them:
+###   - As ROOT, via `sudo ./mck-onboarding.sh --force` — the only way
+###     it's ever been tested ad hoc.
+###   - As the logged-in CONSOLE USER (not root!), via the companion
+###     LaunchAgent — LaunchAgents always run as that session's user,
+###     never as root, no matter who owns/installed the plist file. On a
+###     standard (non-admin) account this means: no /Library writes, no
+###     /var/log writes, no chown, no sudo.
+### RUNNING_AS_ROOT gates every action below that only makes sense in one
+### context or the other, so the same script works correctly in both.
+### ---------------------------------------------------------------------
+
+RUNNING_AS_ROOT=false
+[[ "$(id -u)" -eq 0 ]] && RUNNING_AS_ROOT=true
+
+CONSOLE_USER=$(stat -f "%Su" /dev/console)
+CONSOLE_USER_HOME=$(dscl . -read "/Users/${CONSOLE_USER}" NFSHomeDirectory 2>/dev/null | awk '{print $2}')
+if [[ -z "$CONSOLE_USER_HOME" ]]; then
+  CONSOLE_USER_HOME="/Users/${CONSOLE_USER}"
+fi
+
+### ---------------------------------------------------------------------
 ### CONFIG — edit these
 ### ---------------------------------------------------------------------
 
@@ -78,9 +112,19 @@ DESKTOP_PDF_NAME="Welcome to your MacBook.pdf"     # filename of the info PDF pl
 # user's Desktop as $DESKTOP_PDF_NAME — the two filenames need to match.
 PDF_SOURCE_URL="https://raw.githubusercontent.com/McKinnonIT/onboardo/main/Welcome%20to%20your%20MacBook.pdf"
 
-MARKER_DIR="/Library/Application Support/McKinnon"
+# Root-owned system paths when testing via sudo; user-writable paths under
+# the console user's own home when running for real as a standard user via
+# the LaunchAgent (a standard user has no write access to /Library or
+# /var/log — that mismatch was the actual cause of EX_CONFIG/exit-78
+# failures when this was hardcoded to /var/log and /Library).
+if [[ "$RUNNING_AS_ROOT" == true ]]; then
+  MARKER_DIR="/Library/Application Support/McKinnon"
+  LOG_FILE="/var/log/mck-onboarding.log"
+else
+  MARKER_DIR="${CONSOLE_USER_HOME}/Library/Application Support/McKinnon"
+  LOG_FILE="${CONSOLE_USER_HOME}/Library/Logs/mck-onboarding.log"
+fi
 MARKER_FILE="${MARKER_DIR}/.onboarding-complete"
-LOG_FILE="/var/log/mck-onboarding.log"
 
 # Only relevant when this script is deployed via the companion LaunchAgent
 # (see mck-onboarding-launchagent.plist) — used to self-unload and delete
@@ -117,6 +161,8 @@ done
 ### ---------------------------------------------------------------------
 ### LOGGING
 ### ---------------------------------------------------------------------
+
+mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null
 
 log() {
   echo "$(date '+%Y-%m-%d %H:%M:%S') | $1" | tee -a "$LOG_FILE"
@@ -162,7 +208,15 @@ install_swiftdialog() {
 }
 
 if [[ ! -x "$DIALOG_BIN" ]]; then
-  install_swiftdialog
+  if [[ "$RUNNING_AS_ROOT" == true ]]; then
+    install_swiftdialog
+  else
+    # `installer -pkg ... -target /` needs root — a standard user hitting
+    # this means swiftDialog wasn't pre-installed via Mosyle as expected,
+    # and there's no way to self-heal from a non-root LaunchAgent context.
+    log "ERROR: swiftDialog not found and can't self-install without root (running as ${CONSOLE_USER} via LaunchAgent). Push swiftDialog as a managed app via Mosyle."
+    exit 1
+  fi
 fi
 
 ### ---------------------------------------------------------------------
@@ -327,21 +381,16 @@ rm -f "$DIALOG_COMMAND_FILE"
 #
 # Downloads the info PDF from the (public) repo straight to the logged-in
 # user's Desktop — no separate MDM push of the file needed, just this
-# script + the LaunchAgent. Resolves the console user's home directory
-# rather than assuming $HOME, since this script may run as root (testing
-# via sudo, or an enrolment-time policy) rather than in the user's own
-# session (the LaunchAgent path described in the README).
+# script + the LaunchAgent. CONSOLE_USER/CONSOLE_USER_HOME were already
+# resolved up in EXECUTION CONTEXT.
 
-CONSOLE_USER=$(stat -f "%Su" /dev/console)
-CONSOLE_USER_HOME=$(dscl . -read "/Users/${CONSOLE_USER}" NFSHomeDirectory 2>/dev/null | awk '{print $2}')
-if [[ -z "$CONSOLE_USER_HOME" ]]; then
-  CONSOLE_USER_HOME="/Users/${CONSOLE_USER}"
-fi
 DESKTOP_PDF_PATH="${CONSOLE_USER_HOME}/Desktop/${DESKTOP_PDF_NAME}"
 
 log "Downloading info PDF from ${PDF_SOURCE_URL} to ${DESKTOP_PDF_PATH}"
 if curl -sL --fail -o "$DESKTOP_PDF_PATH" "$PDF_SOURCE_URL" 2>> "$LOG_FILE"; then
-  chown "$CONSOLE_USER" "$DESKTOP_PDF_PATH" 2>> "$LOG_FILE"
+  if [[ "$RUNNING_AS_ROOT" == true ]]; then
+    chown "$CONSOLE_USER" "$DESKTOP_PDF_PATH" 2>> "$LOG_FILE"
+  fi
   log "PDF downloaded successfully."
 else
   log "WARNING: Failed to download info PDF (no network at first login? repo moved/renamed?) — the info page still shows, but opening it automatically on the final page won't find anything."
@@ -395,7 +444,14 @@ COMPLETION_DIALOG_PID=$!
 sleep 1   # give swiftDialog a moment to open before we restart the Dock / open the PDF
 
 log "Opening info PDF for ${CONSOLE_USER}: ${DESKTOP_PDF_PATH}"
-sudo -u "$CONSOLE_USER" open "$DESKTOP_PDF_PATH" >> "$LOG_FILE" 2>&1
+if [[ "$RUNNING_AS_ROOT" == true ]]; then
+  # Dropping privileges to open it as the actual user, not root.
+  sudo -u "$CONSOLE_USER" open "$DESKTOP_PDF_PATH" >> "$LOG_FILE" 2>&1
+else
+  # Already running as that user via the LaunchAgent — no sudo needed
+  # (and a standard user couldn't run it anyway).
+  open "$DESKTOP_PDF_PATH" >> "$LOG_FILE" 2>&1
+fi
 
 log "Restarting Dock (final step, after all config has had time to roll out)"
 killall Dock 2>> "$LOG_FILE" || log "NOTE: killall Dock returned non-zero — Dock may not have been running yet."
@@ -419,6 +475,12 @@ log "Onboarding complete. Marker written to $MARKER_FILE."
 # this is a no-op there. Backgrounded with a short delay and disowned so
 # it survives this script's own exit — we're unloading the very launchd
 # job that's running us, which would otherwise race the parent process.
+#
+# Unloading your own gui/<uid> job needs no special privilege, but
+# deleting the plist FILE from /Library/LaunchAgents does — a standard
+# user (the normal case here) can bootout the job but can't remove the
+# file. That's an acceptable gap: it'll linger on disk and fire again at
+# the next login, but the marker file makes that an instant no-op.
 
 if [[ -f "$LAUNCH_AGENT_PLIST_PATH" ]]; then
   log "Onboarding LaunchAgent found at ${LAUNCH_AGENT_PLIST_PATH} — scheduling self-unload so it doesn't linger."
@@ -428,8 +490,12 @@ if [[ -f "$LAUNCH_AGENT_PLIST_PATH" ]]; then
     if [[ -n "$CONSOLE_UID" ]]; then
       launchctl bootout "gui/${CONSOLE_UID}/${LAUNCH_AGENT_LABEL}" >> "$LOG_FILE" 2>&1
     fi
-    rm -f "$LAUNCH_AGENT_PLIST_PATH"
-    echo "$(date '+%Y-%m-%d %H:%M:%S') | Onboarding LaunchAgent unloaded and removed." >> "$LOG_FILE"
+    if [[ "$RUNNING_AS_ROOT" == true ]]; then
+      rm -f "$LAUNCH_AGENT_PLIST_PATH"
+      echo "$(date '+%Y-%m-%d %H:%M:%S') | Onboarding LaunchAgent unloaded and removed." >> "$LOG_FILE"
+    else
+      echo "$(date '+%Y-%m-%d %H:%M:%S') | Onboarding LaunchAgent unloaded (file removal needs root — left in place, marker file prevents it doing anything next login)." >> "$LOG_FILE"
+    fi
   ) &
   disown
 fi
