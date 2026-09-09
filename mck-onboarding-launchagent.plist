@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.mckinnonsc.onboarding</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/zsh</string>
+		<string>/Applications/McKinnon Onboarding.app/Contents/MacOS/McKinnonOnboarding</string>
+	</array>
+
+	<!-- Fires once, the next time this user logs in and launchd loads
+	     their per-user agents — not a persistent/repeating job. Needs a
+	     Background Task Management (com.apple.servicemanagement) profile
+	     rule (RuleType: Label, RuleValue: com.mckinnonsc.onboarding) to
+	     be auto-approved instead of silently blocked pending manual
+	     approval in System Settings. -->
+	<key>RunAtLoad</key>
+	<true/>
+
+	<!-- Only run in a real GUI (Aqua) session — never at the loginwindow
+	     itself, and never in a background/headless session. -->
+	<key>LimitLoadToSessionType</key>
+	<string>Aqua</string>
+
+	<!-- /var/log is root-only — a standard user (the normal case, since
+	     LaunchAgents always run as the console user) can't create a file
+	     there, and xpcproxy failing to set this up before the job even
+	     starts is EXACTLY what caused the original EX_CONFIG/exit-78
+	     failure. /var/tmp is world-writable (sticky bit) and persists
+	     across reboots, unlike /tmp. This plist is a single static file
+	     shared by whichever user logs in, so it can't reference a
+	     per-user path like ~/Library/Logs — that's what the script's own
+	     LOG_FILE is for; this is just a catch-all for anything before
+	     the script's own logging initializes. -->
+	<key>StandardOutPath</key>
+	<string>/private/var/tmp/mck-onboarding-launchagent.log</string>
+	<key>StandardErrorPath</key>
+	<string>/private/var/tmp/mck-onboarding-launchagent.log</string>
+</dict>
+</plist>

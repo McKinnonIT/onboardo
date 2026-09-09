@@ -3,12 +3,27 @@
 # build-pkg.sh
 #
 # Builds a single signed .pkg containing:
-#   - McKinnon Onboarding.app  (wraps mck-onboarding.sh — same script,
-#     same RUNNING_AS_ROOT logic, just packaged as an app bundle so
-#     Mosyle's "run at login" feature can target it directly, instead of
-#     us hand-rolling a LaunchAgent plist)
-#   - swiftDialog's own official release .pkg, bundled as a second
+#   - McKinnon Onboarding.app  (wraps mck-onboarding.sh, unchanged)
+#   - mck-onboarding-launchagent.plist, installed to /Library/LaunchAgents
+#     — fires the app at first login via RunAtLoad. A postinstall script
+#     also launchctl-bootstraps it immediately if a console user is
+#     already logged in when the pkg installs, rather than only relying
+#     on a future login.
+#   - swiftDialog's own official release .pkg, bundled as a third
 #     component so this is the only thing Mosyle needs to push
+#
+# IMPORTANT: this LaunchAgent needs a Background Task Management MDM
+# profile (com.apple.servicemanagement payload) with a rule approving it,
+# or macOS will silently block it pending manual user approval:
+#   RuleType: Label
+#   RuleValue: com.mckinnonsc.onboarding
+# (No TeamIdentifier — the agent launches a plain script via /bin/zsh,
+# not a Team-signed binary, so that constraint doesn't apply here.)
+# Mosyle's own "run app at login" feature was tried first and dropped —
+# its own delivery channel to the device was too slow to land before
+# first login, which is exactly the failure mode this sidesteps by
+# shipping the LaunchAgent in the same pkg as everything else instead of
+# through a separate, slower Mosyle-side mechanism.
 #
 # Run this from anywhere; it resolves paths relative to the repo root.
 #
@@ -33,6 +48,8 @@ BUILD_DIR="${SCRIPT_DIR}/build"
 DIST_DIR="${SCRIPT_DIR}/dist"
 APP_ROOT="${BUILD_DIR}/app-root"
 APP_BUNDLE="${APP_ROOT}/Applications/${APP_NAME}.app"
+LAUNCH_AGENT_DEST="${APP_ROOT}/Library/LaunchAgents/${BUNDLE_ID}.plist"
+SCRIPTS_DIR="${BUILD_DIR}/scripts"
 
 UNSIGNED=false
 for arg in "$@"; do
@@ -43,6 +60,8 @@ done
 
 rm -rf "$BUILD_DIR" "$DIST_DIR"
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
+mkdir -p "$(dirname "$LAUNCH_AGENT_DEST")"
+mkdir -p "$SCRIPTS_DIR"
 mkdir -p "$DIST_DIR"
 
 ### ---------------------------------------------------------------------
@@ -87,6 +106,42 @@ EOF
 # a proper Developer ID Application cert and swap this for a real
 # identity if this ever needs to be distributed outside MDM.
 codesign --force --deep --sign - "$APP_BUNDLE"
+
+### ---------------------------------------------------------------------
+### 1b. Add the LaunchAgent + its postinstall (immediate-bootstrap) script
+### ---------------------------------------------------------------------
+
+echo "Adding LaunchAgent..."
+
+cp "${REPO_ROOT}/mck-onboarding-launchagent.plist" "$LAUNCH_AGENT_DEST"
+chmod 644 "$LAUNCH_AGENT_DEST"
+
+cat > "${SCRIPTS_DIR}/postinstall" <<POSTINSTALL_EOF
+#!/bin/zsh
+#
+# Runs as root, immediately after this component installs. The plist is
+# now in place for RunAtLoad to pick up at the NEXT login, but if a
+# console user is already logged in right now (installed after Setup
+# Assistant handed off, not before), bootstrap it into their session
+# immediately instead of waiting on a login that might not happen again
+# for a long time on a single-user device. Errors here (already
+# bootstrapped, no console user yet) are harmless — RunAtLoad still
+# covers the normal case.
+
+PLIST_PATH="/Library/LaunchAgents/${BUNDLE_ID}.plist"
+CONSOLE_USER=\$(stat -f "%Su" /dev/console)
+
+if [[ -n "\$CONSOLE_USER" && "\$CONSOLE_USER" != "root" && "\$CONSOLE_USER" != "loginwindow" ]]; then
+  CONSOLE_UID=\$(id -u "\$CONSOLE_USER" 2>/dev/null)
+  if [[ -n "\$CONSOLE_UID" ]]; then
+    launchctl bootstrap "gui/\${CONSOLE_UID}" "\$PLIST_PATH" 2>/dev/null || true
+  fi
+fi
+
+exit 0
+POSTINSTALL_EOF
+
+chmod +x "${SCRIPTS_DIR}/postinstall"
 
 ### ---------------------------------------------------------------------
 ### 2. Fetch swiftDialog's latest official release .pkg
@@ -134,6 +189,7 @@ APP_COMPONENT_PKG="${BUILD_DIR}/onboarding-app-component.pkg"
 
 pkgbuild \
   --root "$APP_ROOT" \
+  --scripts "$SCRIPTS_DIR" \
   --identifier "${BUNDLE_ID}.pkg" \
   --version "$PKG_VERSION" \
   --install-location "/" \

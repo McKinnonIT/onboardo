@@ -8,19 +8,22 @@
 # before wiring it into a Custom Command / policy.
 #
 # IMPORTANT — this script runs as ROOT when you test it with `sudo`, but
-# as the STANDARD, LOGGED-IN USER (never root) when Mosyle launches
-# "McKinnon Onboarding.app" (see packaging/) at first login — apps run at
-# login always run as that session's user, never as root, regardless of
-# who installed them. RUNNING_AS_ROOT below branches on this everywhere
-# it matters (log/marker file locations, chown, sudo -u, swiftDialog
-# self-install). If you add a new step that writes to disk or needs
-# elevated privilege, it needs the same branch — a standard user has no
-# write access to /Library or /var/log, and no sudo.
+# as the STANDARD, LOGGED-IN USER (never root) when the LaunchAgent
+# fires "McKinnon Onboarding.app" (see packaging/) at first login —
+# LaunchAgents (and login items generally) always run as that session's
+# user, never as root, regardless of who installed them. RUNNING_AS_ROOT
+# below branches on this everywhere it matters (log/marker file
+# locations, chown, sudo -u, swiftDialog self-install). If you add a new
+# step that writes to disk or needs elevated privilege, it needs the same
+# branch — a standard user has no write access to /Library or /var/log,
+# and no sudo.
 #
-# (Earlier versions of this deployed via a hand-rolled LaunchAgent
-# instead — that approach is retired. It was fighting launchd session
-# timing and background-item approval quirks that Mosyle's own "run at
-# login" feature already handles.)
+# (Mosyle's own "run app at login" feature was tried instead of a
+# LaunchAgent, and dropped — its own delivery channel to the device was
+# too slow to land before first login in practice. Back to a LaunchAgent,
+# but bundled into the same pkg as everything else, paired with a
+# Background Task Management MDM profile so it's auto-approved instead of
+# silently blocked — see packaging/build-pkg.sh.)
 #
 # WHAT IT DOES
 #   1. Installs swiftDialog if it isn't already present (shouldn't be
@@ -47,25 +50,36 @@
 #   --force skips the "already run" marker check so you can re-run it
 #   as many times as you like while iterating.
 #
-# HOW TO WIRE INTO MOSYLE — fire at first login via the app bundle
+# HOW TO WIRE INTO MOSYLE — fire at first login via a bundled LaunchAgent
 #   swiftDialog needs a real GUI session to draw its windows, and Mosyle's
 #   "Enrollment Complete" trigger runs as root with no UI — so this has to
 #   fire at the user's first *login* instead, into a real GUI session.
 #
 #   1. Build the installer: `packaging/build-pkg.sh`. It wraps this
 #      script in "McKinnon Onboarding.app" (LSUIElement, no Dock icon —
-#      swiftDialog provides the visible UI) and bundles swiftDialog's own
-#      official release .pkg alongside it, signed with a Developer ID
-#      Installer certificate. One .pkg, nothing else to ship separately.
-#   2. Push that .pkg to devices via Mosyle, and use Mosyle's own
-#      "run at login" feature to target "McKinnon Onboarding.app" —
-#      Mosyle owns the actual login-time trigger and its
-#      registration/approval, not this script.
-#   3. The info PDF is NOT shipped this way — it's pulled from
+#      swiftDialog provides the visible UI), installs
+#      mck-onboarding-launchagent.plist to /Library/LaunchAgents so it
+#      fires at first login via RunAtLoad (with a postinstall script that
+#      also bootstraps it immediately if a console user is already
+#      logged in at install time), and bundles swiftDialog's own official
+#      release .pkg alongside it — signed with a Developer ID Installer
+#      certificate. One .pkg, nothing else to ship separately.
+#   2. Push that .pkg to devices via Mosyle.
+#   3. ALSO push a Background Task Management MDM profile
+#      (com.apple.servicemanagement payload) with a rule approving the
+#      LaunchAgent, or macOS will silently block it pending manual user
+#      approval in System Settings:
+#        RuleType: Label
+#        RuleValue: com.mckinnonsc.onboarding
+#      (No TeamIdentifier — this launches a plain script via /bin/zsh,
+#      not a Team-signed binary.) Only takes effect on devices with User
+#      Approved MDM enrollment (should already be true for ADE/supervised
+#      devices).
+#   4. The info PDF is NOT shipped this way — it's pulled from
 #      PDF_SOURCE_URL (this repo, raw.githubusercontent.com) at runtime,
 #      so first login needs working internet for that step to succeed.
 #      It fails soft (logs a warning, carries on) if it can't reach it.
-#   4. The marker file (guard above) stops a repeat login from re-running
+#   5. The marker file (guard above) stops a repeat login from re-running
 #      onboarding.
 #
 # ------------------------------------------------------------------------
