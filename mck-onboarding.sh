@@ -8,16 +8,23 @@
 # before wiring it into a Custom Command / policy.
 #
 # IMPORTANT — this script runs as ROOT when you test it with `sudo`, but
-# as the STANDARD, LOGGED-IN USER (never root) when the companion
-# LaunchAgent fires it at first login — that's just how LaunchAgents work,
-# regardless of who owns the plist file. RUNNING_AS_ROOT below branches on
-# this everywhere it matters (log/marker file locations, chown, sudo -u,
-# swiftDialog self-install). If you add a new step that writes to disk or
-# needs elevated privilege, it needs the same branch — a standard user has
-# no write access to /Library or /var/log, and no sudo.
+# as the STANDARD, LOGGED-IN USER (never root) when Mosyle launches
+# "McKinnon Onboarding.app" (see packaging/) at first login — apps run at
+# login always run as that session's user, never as root, regardless of
+# who installed them. RUNNING_AS_ROOT below branches on this everywhere
+# it matters (log/marker file locations, chown, sudo -u, swiftDialog
+# self-install). If you add a new step that writes to disk or needs
+# elevated privilege, it needs the same branch — a standard user has no
+# write access to /Library or /var/log, and no sudo.
+#
+# (Earlier versions of this deployed via a hand-rolled LaunchAgent
+# instead — that approach is retired. It was fighting launchd session
+# timing and background-item approval quirks that Mosyle's own "run at
+# login" feature already handles.)
 #
 # WHAT IT DOES
-#   1. Installs swiftDialog if it isn't already present.
+#   1. Installs swiftDialog if it isn't already present (shouldn't be
+#      needed in production — see packaging/ below).
 #   2. Shows a branded welcome screen.
 #   3. Runs a quick enrolment check silently, then shows a minimal
 #      app-install page (plain status list, pulsing progress bar) gated
@@ -30,45 +37,36 @@
 #      screen, it opens the info PDF and restarts the Dock, so both
 #      happen last, after everything else has had the whole process to
 #      roll out.
-#   6. Writes a marker file so it only runs once per Mac (delete it to re-test).
-#   7. If it was launched via the companion LaunchAgent, self-unloads and
-#      deletes that LaunchAgent so it doesn't linger as a permanent
-#      background item once its one job is done.
+#   6. Writes a marker file so it only runs once per Mac (delete it to
+#      re-test).
 #
-# HOW TO TEST RIGHT NOW (ad hoc, no LaunchAgent involved)
+# HOW TO TEST RIGHT NOW (ad hoc, as root)
 #   chmod +x mck-onboarding.sh
 #   sudo ./mck-onboarding.sh --force
 #
 #   --force skips the "already run" marker check so you can re-run it
 #   as many times as you like while iterating.
 #
-# HOW TO WIRE INTO MOSYLE — fire at first login via LaunchAgent
+# HOW TO WIRE INTO MOSYLE — fire at first login via the app bundle
 #   swiftDialog needs a real GUI session to draw its windows, and Mosyle's
 #   "Enrollment Complete" trigger runs as root with no UI — so this has to
-#   fire at the user's first *login*, via a LaunchAgent, not at enrolment
-#   itself.
+#   fire at the user's first *login* instead, into a real GUI session.
 #
-#   1. Ship two files to every enrolled Mac (Mosyle Custom Script/Command,
-#      or a profile that drops files):
-#        - this script       -> /Library/Application Support/McKinnon/mck-onboarding.sh
-#        - the companion plist -> /Library/LaunchAgents/com.mckinnonsc.onboarding.plist
-#      (see mck-onboarding-launchagent.plist in this repo — update the
-#      ProgramArguments path in it if you install the script somewhere else.)
-#      The info PDF itself is NOT shipped this way — it's pulled from
+#   1. Build the installer: `packaging/build-pkg.sh`. It wraps this
+#      script in "McKinnon Onboarding.app" (LSUIElement, no Dock icon —
+#      swiftDialog provides the visible UI) and bundles swiftDialog's own
+#      official release .pkg alongside it, signed with a Developer ID
+#      Installer certificate. One .pkg, nothing else to ship separately.
+#   2. Push that .pkg to devices via Mosyle, and use Mosyle's own
+#      "run at login" feature to target "McKinnon Onboarding.app" —
+#      Mosyle owns the actual login-time trigger and its
+#      registration/approval, not this script.
+#   3. The info PDF is NOT shipped this way — it's pulled from
 #      PDF_SOURCE_URL (this repo, raw.githubusercontent.com) at runtime,
 #      so first login needs working internet for that step to succeed.
 #      It fails soft (logs a warning, carries on) if it can't reach it.
-#   2. swiftDialog itself should be pushed as a managed app via Mosyle
-#      too, so it's already installed before first login. The script
-#      can self-install it if it's somehow still missing, but that adds
-#      a delay to the student's first login.
-#   3. launchd loads the LaunchAgent at the user's next login and runs the
-#      script in their session. RunAtLoad + LimitLoadToSessionType=Aqua
-#      means it only fires once per login, and only into a real GUI
-#      session (not e.g. the loginwindow itself).
-#   4. The marker file (guard above) and the LaunchAgent self-cleanup
-#      (step 7 above) both exist so a stray reload or repeat login never
-#      re-runs onboarding — belt and braces.
+#   4. The marker file (guard above) stops a repeat login from re-running
+#      onboarding.
 #
 # ------------------------------------------------------------------------
 
@@ -81,11 +79,11 @@ set -u
 ### lot of bugs have come from conflating them:
 ###   - As ROOT, via `sudo ./mck-onboarding.sh --force` — the only way
 ###     it's ever been tested ad hoc.
-###   - As the logged-in CONSOLE USER (not root!), via the companion
-###     LaunchAgent — LaunchAgents always run as that session's user,
-###     never as root, no matter who owns/installed the plist file. On a
-###     standard (non-admin) account this means: no /Library writes, no
-###     /var/log writes, no chown, no sudo.
+###   - As the logged-in CONSOLE USER (not root!), via "McKinnon
+###     Onboarding.app" at first login — apps run at login always run as
+###     that session's user, never as root, no matter who installed them.
+###     On a standard (non-admin) account this means: no /Library writes,
+###     no /var/log writes, no chown, no sudo.
 ### RUNNING_AS_ROOT gates every action below that only makes sense in one
 ### context or the other, so the same script works correctly in both.
 ### ---------------------------------------------------------------------
@@ -113,10 +111,11 @@ DESKTOP_PDF_NAME="Welcome to your MacBook.pdf"     # filename of the info PDF pl
 PDF_SOURCE_URL="https://raw.githubusercontent.com/McKinnonIT/onboardo/main/Welcome%20to%20your%20MacBook.pdf"
 
 # Root-owned system paths when testing via sudo; user-writable paths under
-# the console user's own home when running for real as a standard user via
-# the LaunchAgent (a standard user has no write access to /Library or
-# /var/log — that mismatch was the actual cause of EX_CONFIG/exit-78
-# failures when this was hardcoded to /var/log and /Library).
+# the console user's own home when running for real as a standard user
+# (a standard user has no write access to /Library or /var/log — that
+# mismatch was the actual cause of EX_CONFIG/exit-78 failures when this
+# was hardcoded to /var/log and /Library under the old LaunchAgent
+# deployment).
 if [[ "$RUNNING_AS_ROOT" == true ]]; then
   MARKER_DIR="/Library/Application Support/McKinnon"
   LOG_FILE="/var/log/mck-onboarding.log"
@@ -125,13 +124,6 @@ else
   LOG_FILE="${CONSOLE_USER_HOME}/Library/Logs/mck-onboarding.log"
 fi
 MARKER_FILE="${MARKER_DIR}/.onboarding-complete"
-
-# Only relevant when this script is deployed via the companion LaunchAgent
-# (see mck-onboarding-launchagent.plist) — used to self-unload and delete
-# that agent after a successful run, so it never lingers as a permanent
-# background item once its one job (firing at first login) is done.
-LAUNCH_AGENT_LABEL="com.mckinnonsc.onboarding"
-LAUNCH_AGENT_PLIST_PATH="/Library/LaunchAgents/${LAUNCH_AGENT_LABEL}.plist"
 
 DIALOG_BIN="/usr/local/bin/dialog"
 DIALOG_COMMAND_FILE="/var/tmp/mck-onboarding-command-$$.log"
@@ -212,9 +204,9 @@ if [[ ! -x "$DIALOG_BIN" ]]; then
     install_swiftdialog
   else
     # `installer -pkg ... -target /` needs root — a standard user hitting
-    # this means swiftDialog wasn't pre-installed via Mosyle as expected,
-    # and there's no way to self-heal from a non-root LaunchAgent context.
-    log "ERROR: swiftDialog not found and can't self-install without root (running as ${CONSOLE_USER} via LaunchAgent). Push swiftDialog as a managed app via Mosyle."
+    # this means the packaging/build-pkg.sh .pkg wasn't installed as
+    # expected, and there's no way to self-heal without root.
+    log "ERROR: swiftDialog not found and can't self-install without root (running as ${CONSOLE_USER}). Check the McKinnonOnboarding-Installer.pkg actually installed swiftDialog."
     exit 1
   fi
 fi
@@ -380,9 +372,9 @@ rm -f "$DIALOG_COMMAND_FILE"
 ### ---------------------------------------------------------------------
 #
 # Downloads the info PDF from the (public) repo straight to the logged-in
-# user's Desktop — no separate MDM push of the file needed, just this
-# script + the LaunchAgent. CONSOLE_USER/CONSOLE_USER_HOME were already
-# resolved up in EXECUTION CONTEXT.
+# user's Desktop — no separate MDM push of the file needed, just the
+# packaged app. CONSOLE_USER/CONSOLE_USER_HOME were already resolved up
+# in EXECUTION CONTEXT.
 
 DESKTOP_PDF_PATH="${CONSOLE_USER_HOME}/Desktop/${DESKTOP_PDF_NAME}"
 
@@ -448,8 +440,8 @@ if [[ "$RUNNING_AS_ROOT" == true ]]; then
   # Dropping privileges to open it as the actual user, not root.
   sudo -u "$CONSOLE_USER" open "$DESKTOP_PDF_PATH" >> "$LOG_FILE" 2>&1
 else
-  # Already running as that user via the LaunchAgent — no sudo needed
-  # (and a standard user couldn't run it anyway).
+  # Already running as that user — no sudo needed (and a standard user
+  # couldn't run it anyway).
   open "$DESKTOP_PDF_PATH" >> "$LOG_FILE" 2>&1
 fi
 
@@ -465,39 +457,5 @@ wait "$COMPLETION_DIALOG_PID"
 mkdir -p "$MARKER_DIR"
 date > "$MARKER_FILE"
 log "Onboarding complete. Marker written to $MARKER_FILE."
-
-### ---------------------------------------------------------------------
-### SELF-CLEANUP: unload + delete the LaunchAgent, if that's how we got here
-### ---------------------------------------------------------------------
-#
-# Only relevant when deployed via the companion LaunchAgent — a plain
-# `sudo ./mck-onboarding.sh --force` test run won't have it installed, so
-# this is a no-op there. Backgrounded with a short delay and disowned so
-# it survives this script's own exit — we're unloading the very launchd
-# job that's running us, which would otherwise race the parent process.
-#
-# Unloading your own gui/<uid> job needs no special privilege, but
-# deleting the plist FILE from /Library/LaunchAgents does — a standard
-# user (the normal case here) can bootout the job but can't remove the
-# file. That's an acceptable gap: it'll linger on disk and fire again at
-# the next login, but the marker file makes that an instant no-op.
-
-if [[ -f "$LAUNCH_AGENT_PLIST_PATH" ]]; then
-  log "Onboarding LaunchAgent found at ${LAUNCH_AGENT_PLIST_PATH} — scheduling self-unload so it doesn't linger."
-  (
-    sleep 2
-    CONSOLE_UID=$(id -u "$CONSOLE_USER" 2>/dev/null)
-    if [[ -n "$CONSOLE_UID" ]]; then
-      launchctl bootout "gui/${CONSOLE_UID}/${LAUNCH_AGENT_LABEL}" >> "$LOG_FILE" 2>&1
-    fi
-    if [[ "$RUNNING_AS_ROOT" == true ]]; then
-      rm -f "$LAUNCH_AGENT_PLIST_PATH"
-      echo "$(date '+%Y-%m-%d %H:%M:%S') | Onboarding LaunchAgent unloaded and removed." >> "$LOG_FILE"
-    else
-      echo "$(date '+%Y-%m-%d %H:%M:%S') | Onboarding LaunchAgent unloaded (file removal needs root — left in place, marker file prevents it doing anything next login)." >> "$LOG_FILE"
-    fi
-  ) &
-  disown
-fi
 
 exit 0
