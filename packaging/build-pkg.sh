@@ -3,27 +3,40 @@
 # build-pkg.sh
 #
 # Builds a single signed .pkg containing:
-#   - McKinnon Onboarding.app  (wraps mck-onboarding.sh, unchanged)
+#   - McKinnon Onboarding.app  (wraps mck-onboarding.sh, unchanged) —
+#     original approach: fired via LaunchAgent + RunAtLoad.
 #   - mck-onboarding-launchagent.plist, installed to /Library/LaunchAgents
-#     — fires the app at first login via RunAtLoad. A postinstall script
-#     also launchctl-bootstraps it immediately if a console user is
-#     already logged in when the pkg installs, rather than only relying
-#     on a future login.
-#   - swiftDialog's own official release .pkg, bundled as a third
-#     component so this is the only thing Mosyle needs to push
+#     — a postinstall script also launchctl-bootstraps it immediately if
+#     a console user is already logged in when the pkg installs.
+#   - mck-onboarding.sh (plain script copy) + mck-onboarding-daemon.sh +
+#     mck-onboarding-launchdaemon.plist, installed to
+#     /Library/Application Support/McKinnon and /Library/LaunchDaemons —
+#     NEWER approach, tried alongside the LaunchAgent rather than instead
+#     of it (nothing's been deleted pending confirmation either works).
+#     The daemon runs as root from boot, polls for a real console user,
+#     then bridges the (unchanged) mck-onboarding.sh into that user's
+#     session via `launchctl asuser ... sudo -u ...` — see
+#     mck-onboarding-daemon.sh for why: the LaunchAgent's script execution
+#     was confirmed via logs but swiftDialog never got a visible window,
+#     never fully root-caused, and this sidesteps needing to.
+#   - swiftDialog's own official release .pkg, bundled as a component so
+#     this is the only thing Mosyle needs to push
 #
-# IMPORTANT: this LaunchAgent needs a Background Task Management MDM
-# profile (com.apple.servicemanagement payload) with a rule approving it,
-# or macOS will silently block it pending manual user approval:
+# IMPORTANT: both the LaunchAgent AND the LaunchDaemon need Background
+# Task Management approval (com.apple.servicemanagement payload), or
+# macOS will silently block them pending manual user approval — verified
+# this applies to LaunchDaemons too, not just Agents:
 #   RuleType: Label
-#   RuleValue: com.mckinnonsc.onboarding
-# (No TeamIdentifier — the agent launches a plain script via /bin/zsh,
-# not a Team-signed binary, so that constraint doesn't apply here.)
+#   RuleValue: com.mckinnonsc.onboarding          (for the LaunchAgent)
+#   RuleValue: com.mckinnonsc.onboarding.daemon   (for the LaunchDaemon)
+# (No TeamIdentifier — both launch a plain script via /bin/zsh, not a
+# Team-signed binary, so that constraint doesn't apply here.)
 # Mosyle's own "run app at login" feature was tried first and dropped —
 # its own delivery channel to the device was too slow to land before
-# first login, which is exactly the failure mode this sidesteps by
-# shipping the LaunchAgent in the same pkg as everything else instead of
-# through a separate, slower Mosyle-side mechanism.
+# first login. Mosyle's Background Task Management zip-upload feature was
+# tried next and hit an unexplained "Unknown error" server-side. Shipping
+# everything through this one pkg (already a proven-reliable Mosyle
+# delivery channel) sidesteps both.
 #
 # Run this from anywhere; it resolves paths relative to the repo root.
 #
@@ -51,6 +64,12 @@ APP_BUNDLE="${APP_ROOT}/Applications/${APP_NAME}.app"
 LAUNCH_AGENT_DEST="${APP_ROOT}/Library/LaunchAgents/${BUNDLE_ID}.plist"
 SCRIPTS_DIR="${BUILD_DIR}/scripts"
 
+DAEMON_LABEL="com.mckinnonsc.onboarding.daemon"
+MCKINNON_DIR="${APP_ROOT}/Library/Application Support/McKinnon"
+ONBOARDING_SCRIPT_DEST="${MCKINNON_DIR}/mck-onboarding.sh"
+DAEMON_SCRIPT_DEST="${MCKINNON_DIR}/mck-onboarding-daemon.sh"
+LAUNCH_DAEMON_DEST="${APP_ROOT}/Library/LaunchDaemons/${DAEMON_LABEL}.plist"
+
 UNSIGNED=false
 for arg in "$@"; do
   case "$arg" in
@@ -61,6 +80,8 @@ done
 rm -rf "$BUILD_DIR" "$DIST_DIR"
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
 mkdir -p "$(dirname "$LAUNCH_AGENT_DEST")"
+mkdir -p "$MCKINNON_DIR"
+mkdir -p "$(dirname "$LAUNCH_DAEMON_DEST")"
 mkdir -p "$SCRIPTS_DIR"
 mkdir -p "$DIST_DIR"
 
@@ -116,27 +137,69 @@ echo "Adding LaunchAgent..."
 cp "${REPO_ROOT}/mck-onboarding-launchagent.plist" "$LAUNCH_AGENT_DEST"
 chmod 644 "$LAUNCH_AGENT_DEST"
 
+### ---------------------------------------------------------------------
+### 1c. Add the LaunchDaemon (root, boot-time, bridges into the console
+###     user's session — see mck-onboarding-daemon.sh for why this
+###     exists alongside the LaunchAgent above)
+### ---------------------------------------------------------------------
+
+echo "Adding LaunchDaemon..."
+
+cp "${REPO_ROOT}/mck-onboarding.sh" "$ONBOARDING_SCRIPT_DEST"
+chmod +x "$ONBOARDING_SCRIPT_DEST"
+
+cp "${REPO_ROOT}/mck-onboarding-daemon.sh" "$DAEMON_SCRIPT_DEST"
+chmod +x "$DAEMON_SCRIPT_DEST"
+
+cp "${REPO_ROOT}/mck-onboarding-launchdaemon.plist" "$LAUNCH_DAEMON_DEST"
+chmod 644 "$LAUNCH_DAEMON_DEST"
+
 cat > "${SCRIPTS_DIR}/postinstall" <<POSTINSTALL_EOF
 #!/bin/zsh
 #
-# Runs as root, immediately after this component installs. The plist is
-# now in place for RunAtLoad to pick up at the NEXT login, but if a
-# console user is already logged in right now (installed after Setup
-# Assistant handed off, not before), bootstrap it into their session
-# immediately instead of waiting on a login that might not happen again
-# for a long time on a single-user device. Errors here (already
-# bootstrapped, no console user yet) are harmless — RunAtLoad still
-# covers the normal case.
+# Runs as root, immediately after this component installs.
+#
+# LaunchAgent: the plist is now in place for RunAtLoad to pick up at the
+# NEXT login, but if a console user is already logged in right now
+# (installed after Setup Assistant handed off, not before), bootstrap it
+# into their session immediately instead of waiting on a login that might
+# not happen again for a long time on a single-user device. Errors here
+# (already bootstrapped, no console user yet) are harmless — RunAtLoad
+# still covers the normal case.
+#
+# LaunchDaemon: RunAtLoad only fires when launchd itself (re)starts,
+# which doesn't happen on a plain pkg install — bootstrap it into the
+# system domain explicitly so it starts polling right away rather than
+# waiting for the next reboot.
 
-PLIST_PATH="/Library/LaunchAgents/${BUNDLE_ID}.plist"
+# A reinstall/redeploy onto a device that's already had this pkg on it
+# before can leave the label registered-but-disabled from an earlier
+# attempt, which makes a plain "bootstrap" fail with "Bootstrap failed:
+# 5: Input/output error" — confirmed hitting this in testing. enable +
+# bootout first, ignoring failures (nothing to enable/bootout on a
+# genuinely fresh device), then bootstrap.
+bootstrap_retry() {
+  local domain="\$1"
+  local plist_path="\$2"
+  local label="\$3"
+
+  launchctl enable "\${domain}/\${label}" 2>/dev/null || true
+  launchctl bootout "\${domain}/\${label}" 2>/dev/null || true
+  launchctl bootstrap "\$domain" "\$plist_path" 2>/dev/null || true
+}
+
+AGENT_PLIST_PATH="/Library/LaunchAgents/${BUNDLE_ID}.plist"
 CONSOLE_USER=\$(stat -f "%Su" /dev/console)
 
 if [[ -n "\$CONSOLE_USER" && "\$CONSOLE_USER" != "root" && "\$CONSOLE_USER" != "loginwindow" ]]; then
   CONSOLE_UID=\$(id -u "\$CONSOLE_USER" 2>/dev/null)
   if [[ -n "\$CONSOLE_UID" ]]; then
-    launchctl bootstrap "gui/\${CONSOLE_UID}" "\$PLIST_PATH" 2>/dev/null || true
+    bootstrap_retry "gui/\${CONSOLE_UID}" "\$AGENT_PLIST_PATH" "${BUNDLE_ID}"
   fi
 fi
+
+DAEMON_PLIST_PATH="/Library/LaunchDaemons/${DAEMON_LABEL}.plist"
+bootstrap_retry "system" "\$DAEMON_PLIST_PATH" "${DAEMON_LABEL}"
 
 exit 0
 POSTINSTALL_EOF

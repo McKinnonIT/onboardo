@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.mckinnonsc.onboarding.daemon</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/zsh</string>
+		<string>/Library/Application Support/McKinnon/mck-onboarding-daemon.sh</string>
+	</array>
+
+	<!-- Runs at boot, not tied to any specific login event — the daemon
+	     script itself polls for a real console user to appear, then
+	     bridges the actual onboarding script into their session via
+	     launchctl asuser. This is a LaunchDAEMON (root, system-wide,
+	     /Library/LaunchDaemons), not a LaunchAgent — no
+	     LimitLoadToSessionType key here, that's Agent-specific and
+	     meaningless for a Daemon. -->
+	<key>RunAtLoad</key>
+	<true/>
+
+	<!-- Runs as root, so /var/log is fine here — unlike the LaunchAgent
+	     plist, which had to avoid it. -->
+	<key>StandardOutPath</key>
+	<string>/var/log/mck-onboarding-launchdaemon.log</string>
+	<key>StandardErrorPath</key>
+	<string>/var/log/mck-onboarding-launchdaemon.log</string>
+</dict>
+</plist>

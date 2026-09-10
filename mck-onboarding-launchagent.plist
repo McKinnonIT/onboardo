@@ -11,12 +11,23 @@
 		<string>/Applications/McKinnon Onboarding.app/Contents/MacOS/McKinnonOnboarding</string>
 	</array>
 
-	<!-- Fires once, the next time this user logs in and launchd loads
-	     their per-user agents — not a persistent/repeating job. Needs a
-	     Background Task Management (com.apple.servicemanagement) profile
-	     rule (RuleType: Label, RuleValue: com.mckinnonsc.onboarding) to
-	     be auto-approved instead of silently blocked pending manual
-	     approval in System Settings. -->
+	<!-- Delivered via packaging/build-pkg.sh, which installs the app to
+	     /Applications and this plist to /Library/LaunchAgents, with a
+	     postinstall script that bootstraps it immediately. (Mosyle's
+	     Background Task Management zip-upload feature was tried instead
+	     — pointing this at its managed path — but hit an unexplained
+	     "Unknown error" server-side, so that approach was dropped.)
+
+	     Fires once, the next time this user logs in and launchd loads
+	     their per-user agents — not a persistent/repeating job. There's
+	     also now a companion LaunchDaemon
+	     (mck-onboarding-launchdaemon.plist) that bridges into the console
+	     user's session via launchctl asuser instead of relying on this
+	     Agent's own login timing — confirmed working in testing where
+	     this Agent's execution was confirmed via logs but never actually
+	     showed a window. Both are shipped side by side for now, neither
+	     deleted, until we're confident which one (or both) actually needs
+	     to stay. -->
 	<key>RunAtLoad</key>
 	<true/>
 
