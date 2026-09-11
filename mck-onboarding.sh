@@ -150,10 +150,13 @@ DIALOG_HEIGHT=420
 
 # When launched via the LaunchDaemon, this script starts running as soon
 # as launchctl asuser bridges in — which can be right as the console
-# session is created, before the desktop has finished drawing. This just
-# delays the first dialog appearing, not the bridge itself (that delay
-# used to live in the daemon, before the bridge call, and silently broke
-# it — see mck-onboarding-daemon.sh).
+# session is created, before the desktop has finished drawing. Shown as
+# an actual loading dialog (--timer, auto-dismisses) rather than a plain
+# `sleep`, which turned out to make things WORSE — with a 20s plain sleep
+# in place of the dialog, the Dock restart at the end never even
+# happened, suggesting an idle shell with no dialog window open during a
+# long wait doesn't hold onto the bridged session reliably. An actual
+# swiftDialog window during that time seems to avoid whatever that was.
 DESKTOP_SETTLE_DELAY=20
 
 ### ---------------------------------------------------------------------
@@ -295,11 +298,26 @@ else
 fi
 
 ### ---------------------------------------------------------------------
-### WELCOME SCREEN
+### LOADING SCREEN (auto-dismisses via --timer, no interaction needed)
 ### ---------------------------------------------------------------------
 
-log "Waiting ${DESKTOP_SETTLE_DELAY}s before showing the first dialog, to let the desktop settle."
-sleep "$DESKTOP_SETTLE_DELAY"
+log "Showing ${DESKTOP_SETTLE_DELAY}s loading screen before the welcome dialog, to let the desktop settle."
+
+"$DIALOG_BIN" \
+  --title "none" \
+  "${BANNER_ARGS[@]}" \
+  --bannertitle "Getting ready" \
+  --message "Just a moment while your Mac finishes settling in..." \
+  --icon "$ICON_PATH" \
+  --button1text "Continue" \
+  --timer "$DESKTOP_SETTLE_DELAY" \
+  --width "$DIALOG_WIDTH" --height "$DIALOG_HEIGHT" \
+  --moveable \
+  --ontop
+
+### ---------------------------------------------------------------------
+### WELCOME SCREEN
+### ---------------------------------------------------------------------
 
 "$DIALOG_BIN" \
   --title "none" \
