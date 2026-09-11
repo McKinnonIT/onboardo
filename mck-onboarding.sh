@@ -154,7 +154,7 @@ DIALOG_HEIGHT=420
 # delays the first dialog appearing, not the bridge itself (that delay
 # used to live in the daemon, before the bridge call, and silently broke
 # it — see mck-onboarding-daemon.sh).
-DESKTOP_SETTLE_DELAY=10
+DESKTOP_SETTLE_DELAY=20
 
 ### ---------------------------------------------------------------------
 ### ARGS
