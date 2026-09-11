@@ -307,11 +307,11 @@ log "Showing ${DESKTOP_SETTLE_DELAY}s loading screen before the welcome dialog, 
   --title "none" \
   "${BANNER_ARGS[@]}" \
   --bannertitle "Getting ready" \
-  --message "Just a moment while your Mac finishes settling in..." \
+  --message "Setting up your MacBook..." \
   --icon "$ICON_PATH" \
-  --button1text "Continue" \
+  --button1text "Please Wait" --button1disabled \
   --timer "$DESKTOP_SETTLE_DELAY" \
-  --width "$DIALOG_WIDTH" --height "$DIALOG_HEIGHT" \
+  --width 400 --height 250 \
   --moveable \
   --ontop
 
