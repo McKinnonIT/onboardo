@@ -148,6 +148,14 @@ POLL_INTERVAL=3          # how often to re-check, in seconds
 DIALOG_WIDTH=640
 DIALOG_HEIGHT=420
 
+# When launched via the LaunchDaemon, this script starts running as soon
+# as launchctl asuser bridges in — which can be right as the console
+# session is created, before the desktop has finished drawing. This just
+# delays the first dialog appearing, not the bridge itself (that delay
+# used to live in the daemon, before the bridge call, and silently broke
+# it — see mck-onboarding-daemon.sh).
+DESKTOP_SETTLE_DELAY=10
+
 ### ---------------------------------------------------------------------
 ### ARGS
 ### ---------------------------------------------------------------------
@@ -289,6 +297,9 @@ fi
 ### ---------------------------------------------------------------------
 ### WELCOME SCREEN
 ### ---------------------------------------------------------------------
+
+log "Waiting ${DESKTOP_SETTLE_DELAY}s before showing the first dialog, to let the desktop settle."
+sleep "$DESKTOP_SETTLE_DELAY"
 
 "$DIALOG_BIN" \
   --title "none" \

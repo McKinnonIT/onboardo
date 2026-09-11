@@ -32,11 +32,6 @@ ONBOARDING_SCRIPT="/Library/Application Support/McKinnon/mck-onboarding.sh"
 LOG_FILE="/var/log/mck-onboarding-daemon.log"
 POLL_INTERVAL=5
 
-# The daemon can detect the console user right as the session starts,
-# before Finder/Dock have finished drawing the desktop — this gives
-# things a moment to settle so the dialog doesn't pop up mid-transition.
-POST_DETECT_DELAY=10
-
 log() {
   echo "$(date '+%Y-%m-%d %H:%M:%S') | $1" | tee -a "$LOG_FILE"
   logger -t "com.mckinnonsc.onboarding.daemon" "$1"
@@ -58,9 +53,19 @@ while true; do
   sleep "$POLL_INTERVAL"
 done
 
-log "Console user detected: ${CONSOLE_USER}. Waiting ${POST_DETECT_DELAY}s for the desktop to settle before bridging in."
+log "Console user detected: ${CONSOLE_USER}. Bridging onboarding script into their session."
 
-sleep "$POST_DETECT_DELAY"
+# Deliberately bridging in immediately, not after a delay — an earlier
+# version waited here before calling launchctl asuser, on the theory
+# that it'd let the desktop settle first. Instead it silently broke: the
+# whole script ran end-to-end (confirmed by logs, and the Dock still got
+# restarted) but no dialog ever appeared, meaning swiftDialog never got
+# a valid WindowServer connection. Most likely cause: the GUI bootstrap
+# session for this UID is only reliably bridgeable right as it's
+# created, not some fixed seconds later once other things have
+# reshuffled it. If a delay is wanted before the dialog appears, it
+# belongs inside mck-onboarding.sh itself (after the bridge has already
+# succeeded), not here.
 
 CONSOLE_UID=$(id -u "$CONSOLE_USER" 2>/dev/null)
 if [[ -z "$CONSOLE_UID" ]]; then
