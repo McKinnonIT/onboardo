@@ -32,8 +32,8 @@
 #      app-install page (plain status list, pulsing progress bar) gated
 #      on both apps landing in /Applications, rechecked every 3s.
 #   4. Downloads the info PDF from this repo straight to the user's
-#      Desktop, then shows a page pointing at it with more details about
-#      their new MacBook.
+#      Desktop (no dedicated page for this — it just opens automatically
+#      on the final screen below).
 #   5. Shows a final page confirming the Mac is ready to go, with a help
 #      contact if anything needs attention — the moment this page is on
 #      screen, it opens the info PDF and restarts the Dock, so both
@@ -59,12 +59,13 @@
 #      /Library/Application Support/McKinnon, and
 #      mck-onboarding-launchdaemon.plist to /Library/LaunchDaemons (with
 #      a postinstall script that bootstraps it immediately rather than
-#      waiting for a reboot), and bundles swiftDialog's own official
-#      release .pkg alongside it — signed with a Developer ID Installer
-#      certificate. One .pkg, nothing else to ship separately.
-#   2. Push that .pkg to devices the same way you already push
-#      swiftDialog's pkg via Mosyle — confirmed working on a real fresh
-#      enrollment (2026-09-11).
+#      waiting for a reboot) — signed with a Developer ID Installer
+#      certificate. swiftDialog is NOT bundled into this pkg — push its
+#      own official release .pkg to Mosyle as a separate app (small,
+#      independent packages proved far more reliable to deliver through
+#      Mosyle than one large combined one — see build-pkg.sh's header).
+#   2. Push both .pkgs to devices via Mosyle — confirmed working on a
+#      real fresh enrollment (2026-09-11).
 #   3. The LaunchDaemon runs as root from boot and polls for a real
 #      console user (see mck-onboarding-daemon.sh), then bridges THIS
 #      script into their session via `launchctl asuser ... sudo -u ...`
@@ -88,11 +89,11 @@ set -u
 ### lot of bugs have come from conflating them:
 ###   - As ROOT, via `sudo ./mck-onboarding.sh --force` — the only way
 ###     it's ever been tested ad hoc.
-###   - As the logged-in CONSOLE USER (not root!), via "McKinnon
-###     Onboarding.app" at first login — apps run at login always run as
-###     that session's user, never as root, no matter who installed them.
-###     On a standard (non-admin) account this means: no /Library writes,
-###     no /var/log writes, no chown, no sudo.
+###   - As the logged-in CONSOLE USER (not root!), bridged in by
+###     mck-onboarding-daemon.sh via `launchctl asuser <uid> sudo -u
+###     <user>` — never as root, no matter that the daemon invoking it
+###     is root. On a standard (non-admin) account this means: no
+###     /Library writes, no /var/log writes, no chown, no sudo.
 ### RUNNING_AS_ROOT gates every action below that only makes sense in one
 ### context or the other, so the same script works correctly in both.
 ### ---------------------------------------------------------------------
@@ -137,27 +138,42 @@ MARKER_FILE="${MARKER_DIR}/.onboarding-complete"
 DIALOG_BIN="/usr/local/bin/dialog"
 DIALOG_COMMAND_FILE="/var/tmp/mck-onboarding-command-$$.log"
 
+# dockutil itself is deployed as its own separate Mosyle package (see
+# https://github.com/kcrawford/dockutil/releases) — NOT bundled into this
+# pkg — this script only calls it, once Chrome is confirmed installed.
+# Own marker (separate from $MARKER_FILE above): bump the year in
+# DOCK_MARKER_FILE to reset every user's Dock for a relayout without
+# forcing the whole onboarding flow to re-run.
+DOCKUTIL_BIN="/usr/local/bin/dockutil"
+DOCK_MARKER_DIR="${CONSOLE_USER_HOME}/Library/Application Support/McKinnonIT"
+DOCK_MARKER_FILE="${DOCK_MARKER_DIR}/DockConfigured-2026"
+# Pinned in this order. Edit for your fleet — each path needs to actually
+# exist by the time this runs (Chrome is guaranteed by this point; add
+# anything else here only once you're sure it lands before it does too).
+DOCK_APPS=(
+  "/System/Applications/Apps.app"
+  "/Applications/Manager.app"
+  "/Applications/Google Chrome.app"
+)
+
 # How long (seconds) to wait for the app-install gate before giving up and
 # flagging it as needing attention on the completion screen, instead of
 # hanging forever. Set to 0 to wait indefinitely.
 POLL_TIMEOUT=1200        # 20 minutes
 POLL_INTERVAL=3          # how often to re-check, in seconds
 
+# swiftDialog now ships as its own separate Mosyle package rather than
+# bundled into this one (see packaging/build-pkg.sh's header) — there's
+# no guarantee it lands before or at the same time as this script starts
+# running, since Mosyle pushes/installs each app independently. Wait for
+# it rather than failing immediately the first time it isn't there yet.
+DIALOG_WAIT_TIMEOUT=300  # 5 minutes
+DIALOG_WAIT_INTERVAL=5
+
 # Shared so every dialog page is the same size — swapping between
 # differently-sized windows read as visually inconsistent.
 DIALOG_WIDTH=640
 DIALOG_HEIGHT=420
-
-# When launched via the LaunchDaemon, this script starts running as soon
-# as launchctl asuser bridges in — which can be right as the console
-# session is created, before the desktop has finished drawing. Shown as
-# an actual loading dialog (--timer, auto-dismisses) rather than a plain
-# `sleep`, which turned out to make things WORSE — with a 20s plain sleep
-# in place of the dialog, the Dock restart at the end never even
-# happened, suggesting an idle shell with no dialog window open during a
-# long wait doesn't hold onto the bridged session reliably. An actual
-# swiftDialog window during that time seems to avoid whatever that was.
-DESKTOP_SETTLE_DELAY=20
 
 ### ---------------------------------------------------------------------
 ### ARGS
@@ -240,15 +256,48 @@ install_swiftdialog() {
   log "swiftDialog installed successfully."
 }
 
-if [[ ! -x "$DIALOG_BIN" ]]; then
+# /usr/local/bin/dialog is only a convenience symlink — swiftDialog's own
+# postinstall script creates it by self-invoking its freshly-installed
+# CLI binary ("${dialogcli}" --link). That's one more thing that can fail
+# independently of whether the actual app payload installed fine —
+# confirmed hitting exactly that on a real device (Dialog.app present,
+# symlink missing, no self-service way to inspect that device's own
+# swiftDialog postinstall.log to confirm why). Don't depend on it: fall
+# back to the real binary at its fixed install path if the symlink isn't
+# there.
+FALLBACK_DIALOG_BIN="/Library/Application Support/Dialog/Dialog.app/Contents/MacOS/dialogcli"
+
+resolve_dialog_bin() {
+  if [[ -x "$DIALOG_BIN" ]]; then
+    return 0
+  fi
+  if [[ -x "$FALLBACK_DIALOG_BIN" ]]; then
+    DIALOG_BIN="$FALLBACK_DIALOG_BIN"
+    return 0
+  fi
+  return 1
+}
+
+if ! resolve_dialog_bin; then
   if [[ "$RUNNING_AS_ROOT" == true ]]; then
     install_swiftdialog
   else
-    # `installer -pkg ... -target /` needs root — a standard user hitting
-    # this means the packaging/build-pkg.sh .pkg wasn't installed as
-    # expected, and there's no way to self-heal without root.
-    log "ERROR: swiftDialog not found and can't self-install without root (running as ${CONSOLE_USER}). Check the McKinnonOnboarding-Installer.pkg actually installed swiftDialog."
-    exit 1
+    # `installer -pkg ... -target /` needs root, and there's no way to
+    # self-heal without it — but swiftDialog is a separate Mosyle package
+    # now (see packaging/build-pkg.sh's header), with no guarantee it's
+    # landed by the time this fires, so wait for it rather than assuming
+    # something's actually broken.
+    log "swiftDialog not found yet (running as ${CONSOLE_USER}) — waiting up to ${DIALOG_WAIT_TIMEOUT}s for its separate Mosyle push to land..."
+    waited=0
+    while ! resolve_dialog_bin; do
+      if [[ "$waited" -ge "$DIALOG_WAIT_TIMEOUT" ]]; then
+        log "ERROR: swiftDialog still not found after waiting ${DIALOG_WAIT_TIMEOUT}s. Check its separate Mosyle push actually completed on this device."
+        exit 1
+      fi
+      sleep "$DIALOG_WAIT_INTERVAL"
+      waited=$(( waited + DIALOG_WAIT_INTERVAL ))
+    done
+    log "swiftDialog found after waiting ${waited}s."
   fi
 fi
 
@@ -298,24 +347,6 @@ else
 fi
 
 ### ---------------------------------------------------------------------
-### LOADING SCREEN (auto-dismisses via --timer, no interaction needed)
-### ---------------------------------------------------------------------
-
-log "Showing ${DESKTOP_SETTLE_DELAY}s loading screen before the welcome dialog, to let the desktop settle."
-
-"$DIALOG_BIN" \
-  --title "none" \
-  "${BANNER_ARGS[@]}" \
-  --bannertitle "Getting ready" \
-  --message "Setting up your MacBook..." \
-  --icon "$ICON_PATH" \
-  --button1text "Please Wait" --button1disabled \
-  --timer "$DESKTOP_SETTLE_DELAY" \
-  --width 400 --height 250 \
-  --moveable \
-  --ontop
-
-### ---------------------------------------------------------------------
 ### WELCOME SCREEN
 ### ---------------------------------------------------------------------
 
@@ -323,7 +354,7 @@ log "Showing ${DESKTOP_SETTLE_DELAY}s loading screen before the welcome dialog, 
   --title "none" \
   "${BANNER_ARGS[@]}" \
   --bannertitle "Welcome to your new Mac" \
-  --message "Hi! This Mac has just been enrolled with **${ORG_NAME}**.\n\nWe'll spend the next minute or two setting a few things up and confirming your device is ready to go. You don't need to do anything — just leave this window open." \
+  --message "Hi! This Mac has just been enrolled with **${ORG_NAME}**.\n\nWe'll spend the next minute or two setting a few things up and confirming your device is ready to go." \
   --icon "$ICON_PATH" \
   --button1text "Let's Go" \
   --width "$DIALOG_WIDTH" --height "$DIALOG_HEIGHT" \
@@ -361,12 +392,13 @@ log "Showing ${DESKTOP_SETTLE_DELAY}s loading screen before the welcome dialog, 
   --title "none" \
   "${BANNER_ARGS[@]}" \
   --bannertitle "Installing your apps" \
-  --message "Hang tight while these finish installing. This page will move on automatically once both are ready." \
+  --message "Hang tight while these finish installing. You can click the Continue button when everything is installed." \
   --icon none \
   --progress \
   --progresstext "Installing..." \
   --listitem "Google Chrome,icon=SF=circle.dashed,status=wait,statustext=Installing..." \
   --listitem "Google Drive,icon=SF=circle.dashed,status=wait,statustext=Installing..." \
+  --listitem "Setting up your Dock,icon=SF=circle.dashed,status=wait,statustext=Waiting..." \
   --button1text "Please Wait" --button1disabled \
   --width "$DIALOG_WIDTH" --height "$DIALOG_HEIGHT" \
   --moveable \
@@ -413,6 +445,67 @@ done
 
 if [[ "$CHROME_DONE" == true && "$DRIVE_DONE" == true ]]; then
   log "Google Chrome and Google Drive are both installed."
+else
+  log "Continuing without every app installed (see timeout note above)."
+fi
+
+### ---------------------------------------------------------------------
+### DOCK CONFIGURATION — third row on this same list, via dockutil
+###
+### Runs here rather than via a separate recurring Mosyle "Login" script
+### because everything a standalone version of this would need to poll
+### for is already true by this point: we're confirmed running as the
+### real console user in a live GUI session (swiftDialog is already on
+### screen), and Chrome's install state is already known from the loop
+### above. Every dockutil call passes --no-restart — the completion
+### screen's own Dock restart at the very end of this script picks up
+### these changes along with everything else.
+### ---------------------------------------------------------------------
+
+run_as_console_user() {
+  if [[ "$RUNNING_AS_ROOT" == true ]]; then
+    sudo -u "$CONSOLE_USER" "$@"
+  else
+    "$@"
+  fi
+}
+
+DOCK_DONE=false
+
+if [[ -f "$DOCK_MARKER_FILE" ]]; then
+  log "Dock already configured for ${CONSOLE_USER} (marker exists). Skipping."
+  DOCK_DONE=true
+  echo "listitem: index: 2, icon: SF=checkmark.circle.fill, status: success, statustext: Already configured" >> "$DIALOG_COMMAND_FILE"
+elif [[ "$CHROME_DONE" == false ]]; then
+  log "Skipping Dock configuration — Google Chrome never finished installing."
+  echo "listitem: index: 2, icon: SF=xmark.circle.fill, status: fail, statustext: Skipped (Chrome missing)" >> "$DIALOG_COMMAND_FILE"
+  ANY_FAILED=true
+elif [[ ! -x "$DOCKUTIL_BIN" ]]; then
+  log "WARNING: dockutil not found at ${DOCKUTIL_BIN} — deploy its package first. Skipping Dock configuration."
+  echo "listitem: index: 2, icon: SF=xmark.circle.fill, status: fail, statustext: Not installed" >> "$DIALOG_COMMAND_FILE"
+  ANY_FAILED=true
+else
+  log "Configuring Dock for ${CONSOLE_USER}..."
+  echo "listitem: index: 2, icon: SF=circle.dashed, status: wait, statustext: Configuring..." >> "$DIALOG_COMMAND_FILE"
+
+  run_as_console_user "$DOCKUTIL_BIN" --remove all --no-restart
+  for dock_app in "${DOCK_APPS[@]}"; do
+    run_as_console_user "$DOCKUTIL_BIN" --add "$dock_app" --no-restart
+  done
+  run_as_console_user "$DOCKUTIL_BIN" --add "$CONSOLE_USER_HOME" --view grid --display folder --no-restart
+
+  mkdir -p "$DOCK_MARKER_DIR"
+  date > "$DOCK_MARKER_FILE"
+  if [[ "$RUNNING_AS_ROOT" == true ]]; then
+    chown "$CONSOLE_USER" "$DOCK_MARKER_DIR" "$DOCK_MARKER_FILE" 2>> "$LOG_FILE"
+  fi
+
+  DOCK_DONE=true
+  echo "listitem: index: 2, icon: SF=checkmark.circle.fill, status: success, statustext: Configured" >> "$DIALOG_COMMAND_FILE"
+  log "Dock configured for ${CONSOLE_USER}. Marker written to ${DOCK_MARKER_FILE}."
+fi
+
+if [[ "$CHROME_DONE" == true && "$DRIVE_DONE" == true && "$DOCK_DONE" == true ]]; then
   echo "progresstext: All done!" >> "$DIALOG_COMMAND_FILE"
 else
   echo "progresstext: Still finishing up — continuing anyway." >> "$DIALOG_COMMAND_FILE"
@@ -427,7 +520,7 @@ wait "$DIALOG_PID"
 rm -f "$DIALOG_COMMAND_FILE"
 
 ### ---------------------------------------------------------------------
-### PDF INFO PAGE
+### PDF DOWNLOAD (no dedicated page — it just opens on the completion screen)
 ### ---------------------------------------------------------------------
 #
 # Downloads the info PDF from the (public) repo straight to the logged-in
@@ -444,18 +537,8 @@ if curl -sL --fail -o "$DESKTOP_PDF_PATH" "$PDF_SOURCE_URL" 2>> "$LOG_FILE"; the
   fi
   log "PDF downloaded successfully."
 else
-  log "WARNING: Failed to download info PDF (no network at first login? repo moved/renamed?) — the info page still shows, but opening it automatically on the final page won't find anything."
+  log "WARNING: Failed to download info PDF (no network at first login? repo moved/renamed?) — opening it automatically on the final page won't find anything."
 fi
-
-"$DIALOG_BIN" \
-  --title "none" \
-  "${BANNER_ARGS[@]}" \
-  --bannertitle "One more thing" \
-  --message "We've left a short PDF on your Desktop called **${DESKTOP_PDF_NAME}** with more information about your new MacBook Neo.\n\nIt'll open automatically when the setup process is complete." \
-  --icon "SF=doc.text.fill,colour=${ACCENT_COLOR}" \
-  --button1text "Got it" \
-  --width "$DIALOG_WIDTH" --height "$DIALOG_HEIGHT" \
-  --moveable --ontop
 
 ### ---------------------------------------------------------------------
 ### COMPLETION SCREEN (+ FINAL DOCK RESTART, + PDF AUTO-OPEN)
@@ -484,7 +567,7 @@ else
     --title "none" \
     "${BANNER_ARGS[@]}" \
     --bannertitle "You're all set!" \
-    --message "Your Mac has been configured and is ready to use.\n\nIf you need assistance, please reach out to McKinnon IT at **${HELP_EMAIL}**" \
+    --message "Your Mac has been configured and is ready to use.\n\nIf you need assistance, please reach out to McKinnon IT via **${HELP_EMAIL}**" \
     --icon "SF=checkmark.circle.fill,colour=${ACCENT_COLOR}" \
     --button1text "Finish" \
     --width "$DIALOG_WIDTH" --height "$DIALOG_HEIGHT" \
