@@ -2,16 +2,28 @@
 #
 # build-pkg.sh
 #
-# Builds a single signed .pkg containing:
-#   - mck-onboarding.sh (plain script copy) + mck-onboarding-daemon.sh +
-#     mck-onboarding-launchdaemon.plist, installed to
-#     /Library/Application Support/McKinnon and /Library/LaunchDaemons.
-#     The daemon runs as root from boot, polls for a real console user,
-#     then bridges the (unchanged) mck-onboarding.sh into that user's
-#     session via `launchctl asuser ... sudo -u ...` — see
-#     mck-onboarding-daemon.sh for the full reasoning.
-#   - swiftDialog's own official release .pkg, bundled as a component so
-#     this is the only thing Mosyle needs to push
+# Builds a single signed .pkg containing mck-onboarding.sh (plain script
+# copy) + mck-onboarding-daemon.sh + mck-onboarding-launchdaemon.plist,
+# installed to /Library/Application Support/McKinnon and
+# /Library/LaunchDaemons. The daemon runs as root from boot, polls for a
+# real console user, then bridges the (unchanged) mck-onboarding.sh into
+# that user's session via `launchctl asuser ... sudo -u ...` — see
+# mck-onboarding-daemon.sh for the full reasoning.
+#
+# swiftDialog itself is NOT bundled in here — push its own official
+# release .pkg (https://github.com/swiftDialog/swiftDialog/releases) to
+# Mosyle separately, same as this one. An earlier version of this bundled
+# both into one combined .pkg for a single upload; reverted 2026-09-14
+# after that combined package repeatedly hit "Killed: 9" /
+# corrupted-download failures pushing it through Mosyle (almost certainly
+# because swiftDialog's own Dialog.app dominates the size — ~20MB of the
+# combined pkg's ~21MB total) and swiftDialog's own self-linking
+# postinstall step (which creates /usr/local/bin/dialog) failed silently
+# on at least one real device as a result. Two small, independent
+# packages are far less likely to hit either problem than one large one,
+# and since this only gets set up in Mosyle occasionally rather than
+# re-uploaded constantly, the two-upload inconvenience is a good trade
+# for the reliability.
 #
 # An earlier version of this also shipped a LaunchAgent + app bundle as a
 # second, parallel trigger mechanism. Removed 2026-09-11 after confirming
@@ -58,7 +70,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 DAEMON_LABEL="com.mckinnonsc.onboarding.daemon"
-PKG_VERSION="1.0"
+PKG_VERSION="2.1"
 SIGNING_IDENTITY="Developer ID Installer: Alastair Ling (G8AMUBLDT2)"
 
 BUILD_DIR="${SCRIPT_DIR}/build"
@@ -77,6 +89,22 @@ for arg in "$@"; do
     --unsigned) UNSIGNED=true ;;
   esac
 done
+
+# Fail fast with a clear message instead of hitting an opaque productbuild
+# error at the very end of the build. `security find-identity` only lists
+# an identity here if the cert AND its matching private key are both
+# present in a keychain on the current login keychain search list — a
+# cert imported by itself (e.g. downloading the .cer from the developer
+# portal without ever generating/keeping the CSR's private key on this
+# Mac) shows up in `security find-certificate` but NOT here, which is a
+# common way this shows up.
+if [[ "$UNSIGNED" == false ]]; then
+  if ! security find-identity -v -p basic 2>/dev/null | grep -qF "$SIGNING_IDENTITY"; then
+    echo "ERROR: Signing identity \"$SIGNING_IDENTITY\" not found (or has no matching private key) in any keychain on the search list." >&2
+    echo "Run \`security find-identity -v -p basic\` to see what's actually usable, or pass --unsigned to build without signing." >&2
+    exit 1
+  fi
+fi
 
 rm -rf "$BUILD_DIR" "$DIST_DIR"
 mkdir -p "$MCKINNON_DIR"
@@ -114,12 +142,35 @@ cat > "${SCRIPTS_DIR}/postinstall" <<POSTINSTALL_EOF
 # 5: Input/output error" — confirmed hitting this in testing. enable +
 # bootout first, ignoring failures (nothing to enable/bootout on a
 # genuinely fresh device), then bootstrap.
+#
+# Every launchctl call here used to swallow its result entirely
+# (2>/dev/null || true) — meaning a silent bootstrap failure (e.g. an
+# MDM-supervised device not yet approving this via Background Task
+# Management) looked identical to success, with zero evidence anywhere.
+# Confirmed hitting exactly this on a real device: the daemon only
+# started after a manual reboot, and there was nothing in any log to
+# show why the immediate bootstrap hadn't worked. Logging the actual
+# result of each step now, plus a final \`launchctl print\` check to
+# confirm whether the daemon is actually loaded — if BTM is blocking it,
+# this is the only place that'll show it.
 
+POSTINSTALL_LOG="/var/log/mck-onboarding-postinstall.log"
 DAEMON_PLIST_PATH="/Library/LaunchDaemons/${DAEMON_LABEL}.plist"
 
-launchctl enable "system/${DAEMON_LABEL}" 2>/dev/null || true
-launchctl bootout "system/${DAEMON_LABEL}" 2>/dev/null || true
-launchctl bootstrap system "\$DAEMON_PLIST_PATH" 2>/dev/null || true
+plog() {
+  echo "\$(date '+%Y-%m-%d %H:%M:%S') | \$1" | tee -a "\$POSTINSTALL_LOG"
+}
+
+plog "postinstall starting for ${DAEMON_LABEL}"
+plog "enable: \$(launchctl enable "system/${DAEMON_LABEL}" 2>&1; echo "exit=\$?")"
+plog "bootout: \$(launchctl bootout "system/${DAEMON_LABEL}" 2>&1; echo "exit=\$?")"
+plog "bootstrap: \$(launchctl bootstrap system "\$DAEMON_PLIST_PATH" 2>&1; echo "exit=\$?")"
+
+if launchctl print "system/${DAEMON_LABEL}" >/dev/null 2>&1; then
+  plog "Confirmed loaded immediately: system/${DAEMON_LABEL} is registered with launchd."
+else
+  plog "WARNING: system/${DAEMON_LABEL} is NOT registered with launchd after bootstrap — likely blocked (e.g. Background Task Management approval pending on a supervised device). It will only start at the next full boot via RunAtLoad."
+fi
 
 exit 0
 POSTINSTALL_EOF
@@ -127,75 +178,33 @@ POSTINSTALL_EOF
 chmod +x "${SCRIPTS_DIR}/postinstall"
 
 ### ---------------------------------------------------------------------
-### 2. Fetch swiftDialog's latest official release .pkg
-### ---------------------------------------------------------------------
-#
-# swiftDialog ships its .pkg as a full "product archive" (built with
-# productbuild, not pkgbuild) — that's not something productbuild can
-# nest as a component inside another distribution package. It expands to
-# a plain component package one level down, so pull that out and
-# re-flatten it into a standalone component .pkg we CAN nest.
-
-echo "Downloading latest swiftDialog release..."
-
-SWIFTDIALOG_RAW_PKG="${BUILD_DIR}/swiftDialog-raw.pkg"
-SWIFTDIALOG_PKG="${BUILD_DIR}/swiftDialog-component.pkg"
-SWIFTDIALOG_URL=$(curl -sL "https://api.github.com/repos/swiftDialog/swiftDialog/releases/latest" \
-  | grep "browser_download_url.*\.pkg" \
-  | cut -d '"' -f 4)
-
-if [[ -z "$SWIFTDIALOG_URL" ]]; then
-  echo "ERROR: Could not resolve latest swiftDialog release URL." >&2
-  exit 1
-fi
-
-curl -sL -o "$SWIFTDIALOG_RAW_PKG" "$SWIFTDIALOG_URL"
-
-SWIFTDIALOG_EXPANDED="${BUILD_DIR}/swiftDialog-expanded"
-pkgutil --expand "$SWIFTDIALOG_RAW_PKG" "$SWIFTDIALOG_EXPANDED"
-
-INNER_COMPONENT=$(find "$SWIFTDIALOG_EXPANDED" -maxdepth 1 -name "*.pkg" | head -1)
-if [[ -z "$INNER_COMPONENT" ]]; then
-  echo "ERROR: Couldn't find an inner component package inside swiftDialog's release .pkg — its packaging format may have changed." >&2
-  exit 1
-fi
-
-pkgutil --flatten "$INNER_COMPONENT" "$SWIFTDIALOG_PKG"
-
-### ---------------------------------------------------------------------
-### 3. pkgbuild the onboarding component
+### 2. Build the signed pkg
 ### ---------------------------------------------------------------------
 
-echo "Building onboarding component package..."
+echo "Building onboarding package..."
 
-APP_COMPONENT_PKG="${BUILD_DIR}/onboarding-app-component.pkg"
-
-pkgbuild \
-  --root "$APP_ROOT" \
-  --scripts "$SCRIPTS_DIR" \
-  --identifier "${DAEMON_LABEL}.pkg" \
-  --version "$PKG_VERSION" \
-  --install-location "/" \
-  "$APP_COMPONENT_PKG"
-
-### ---------------------------------------------------------------------
-### 4. Combine both components into one distribution package
-### ---------------------------------------------------------------------
-
-echo "Combining into final distribution package..."
-
-FINAL_PKG="${DIST_DIR}/McKinnonOnboarding-Installer.pkg"
+# Versioned filename (not just versioned pkg identifier/version) so a
+# rebuild uploads as a genuinely new file to Mosyle's CDN, rather than
+# replacing the bytes behind the same filename/reference — this mattered
+# while tracking down a corrupted-download issue and is cheap to keep.
+FINAL_PKG="${DIST_DIR}/McKinnonOnboarding-Installer-${PKG_VERSION}.pkg"
 
 if [[ "$UNSIGNED" == true ]]; then
-  productbuild \
-    --package "$APP_COMPONENT_PKG" \
-    --package "$SWIFTDIALOG_PKG" \
+  pkgbuild \
+    --root "$APP_ROOT" \
+    --scripts "$SCRIPTS_DIR" \
+    --identifier "${DAEMON_LABEL}.pkg" \
+    --version "$PKG_VERSION" \
+    --install-location "/" \
     "$FINAL_PKG"
   echo "Built UNSIGNED package: $FINAL_PKG"
 else
-  productbuild \
-    --package "$APP_COMPONENT_PKG" \
-    --package "$SWIFTDIALOG_PKG" \
+  pkgbuild \
+    --root "$APP_ROOT" \
+    --scripts "$SCRIPTS_DIR" \
+    --identifier "${DAEMON_LABEL}.pkg" \
+    --version "$PKG_VERSION" \
+    --install-location "/" \
     --sign "$SIGNING_IDENTITY" \
     "$FINAL_PKG"
   echo "Built and signed package: $FINAL_PKG"
