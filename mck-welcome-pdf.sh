@@ -2,10 +2,11 @@
 #
 # mck-welcome-pdf.sh
 #
-# McKinnon Secondary College — standalone "welcome PDF" delivery, with NO
-# dialog/UI dependency at all (no swiftDialog, no LaunchDaemon bridge).
-# For devices/fleets that don't need the full mck-onboarding.sh walkthrough
-# but should still get the info PDF on first login.
+# McKinnon Secondary College — standalone "welcome PDF" + Dock setup,
+# with NO dialog/UI dependency at all (no swiftDialog, no LaunchDaemon
+# bridge). For devices/fleets that don't need the full mck-onboarding.sh
+# walkthrough but should still get the info PDF and a configured Dock on
+# first login.
 #
 # Runs as the logged-in user via a plain LaunchAgent (see
 # mck-welcome-pdf-launchagent.plist) — safe here specifically because all
@@ -62,6 +63,29 @@ MARKER_FILE="${MARKER_DIR}/.welcome-pdf-complete"
 LOG_FILE="${CONSOLE_USER_HOME}/Library/Logs/mck-welcome-pdf.log"
 LOGGER_TAG="com.mckinnonsc.welcomepdf"
 
+# dockutil itself is deployed as its own separate Mosyle package (see
+# https://github.com/kcrawford/dockutil/releases) — NOT bundled into this
+# pkg, and (same as swiftDialog for mck-onboarding.sh) with no guarantee
+# it's landed by the time this LaunchAgent fires, since Mosyle
+# pushes/installs each app independently. Same marker path/DOCK_APPS list
+# as mck-onboarding.sh's own Dock step, deliberately — a device only ever
+# gets its Dock reset once no matter which of the two pkgs actually
+# triggers it, and "bump the year to relayout" instructions stay valid
+# regardless of which one's installed. Unlike mck-onboarding.sh, this
+# doesn't wait/poll for Chrome first — this pkg is for fleets that don't
+# need the full app-install gate, so it just configures what's already
+# there at the time dockutil itself becomes available.
+DOCKUTIL_BIN="/usr/local/bin/dockutil"
+DOCK_MARKER_DIR="${CONSOLE_USER_HOME}/Library/Application Support/McKinnonIT"
+DOCK_MARKER_FILE="${DOCK_MARKER_DIR}/DockConfigured-2026"
+DOCK_APPS=(
+  "/System/Applications/Apps.app"
+  "/Applications/Manager.app"
+  "/Applications/Google Chrome.app"
+)
+DOCKUTIL_WAIT_TIMEOUT=300  # 5 minutes
+DOCKUTIL_WAIT_INTERVAL=5
+
 ### ---------------------------------------------------------------------
 ### ARGS
 ### ---------------------------------------------------------------------
@@ -110,6 +134,44 @@ fi
 
 log "Opening info PDF for ${CONSOLE_USER}: ${DESKTOP_PDF_PATH}"
 open "$DESKTOP_PDF_PATH" >> "$LOG_FILE" 2>&1
+
+### ---------------------------------------------------------------------
+### DOCK CONFIGURATION (one-time per user, via dockutil)
+### ---------------------------------------------------------------------
+
+if [[ -f "$DOCK_MARKER_FILE" ]]; then
+  log "Dock already configured for ${CONSOLE_USER} (marker exists). Skipping."
+else
+  if [[ ! -x "$DOCKUTIL_BIN" ]]; then
+    log "dockutil not found yet — waiting up to ${DOCKUTIL_WAIT_TIMEOUT}s for its separate Mosyle push to land..."
+    waited=0
+    while [[ ! -x "$DOCKUTIL_BIN" && "$waited" -lt "$DOCKUTIL_WAIT_TIMEOUT" ]]; do
+      sleep "$DOCKUTIL_WAIT_INTERVAL"
+      waited=$(( waited + DOCKUTIL_WAIT_INTERVAL ))
+    done
+    if [[ -x "$DOCKUTIL_BIN" ]]; then
+      log "dockutil found after waiting ${waited}s."
+    fi
+  fi
+
+  if [[ ! -x "$DOCKUTIL_BIN" ]]; then
+    log "WARNING: dockutil still not found after waiting ${DOCKUTIL_WAIT_TIMEOUT}s — deploy its package first. Skipping Dock configuration."
+  else
+    log "Configuring Dock for ${CONSOLE_USER}..."
+
+    "$DOCKUTIL_BIN" --remove all --no-restart
+    for dock_app in "${DOCK_APPS[@]}"; do
+      "$DOCKUTIL_BIN" --add "$dock_app" --no-restart
+    done
+    "$DOCKUTIL_BIN" --add "$CONSOLE_USER_HOME" --view grid --display folder --no-restart
+
+    mkdir -p "$DOCK_MARKER_DIR"
+    date > "$DOCK_MARKER_FILE"
+
+    log "Dock configured for ${CONSOLE_USER}. Marker written to ${DOCK_MARKER_FILE}. Restarting Dock."
+    killall Dock 2>> "$LOG_FILE" || log "NOTE: killall Dock returned non-zero — Dock may not have been running yet."
+  fi
+fi
 
 ### ---------------------------------------------------------------------
 ### MARK COMPLETE

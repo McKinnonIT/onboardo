@@ -24,7 +24,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 AGENT_LABEL="com.mckinnonsc.welcomepdf"
-PKG_VERSION="1.0"
+PKG_VERSION="1.2"
 SIGNING_IDENTITY="Developer ID Installer: Alastair Ling (G8AMUBLDT2)"
 
 BUILD_DIR="${SCRIPT_DIR}/build-pdf"
