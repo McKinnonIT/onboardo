@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.mckinnonsc.welcomepdf</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/zsh</string>
+		<string>/Library/Application Support/McKinnon/mck-welcome-pdf.sh</string>
+	</array>
+
+	<!-- Loaded per-user, into their real GUI session — that's fine here
+	     because all mck-welcome-pdf.sh does is `open` a file, which
+	     doesn't draw anything itself. mck-onboarding.sh's swiftDialog
+	     windows are different: a plain LaunchAgent never reliably got
+	     swiftDialog a real WindowServer connection in testing, which is
+	     why that flow needs the heavier LaunchDaemon+bridge mechanism
+	     instead (see mck-onboarding-daemon.sh). -->
+	<key>RunAtLoad</key>
+	<true/>
+	<key>LimitLoadToSessionType</key>
+	<string>Aqua</string>
+
+	<!-- Deliberately no StandardOutPath/StandardErrorPath — a earlier
+	     LaunchAgent attempt in this repo hardcoded one under /var/log
+	     and failed with EX_CONFIG/exit-78, since a LaunchAgent always
+	     runs as the standard logged-in user, who has no write access
+	     there (see packaging/build-pkg.sh's deployment-mechanism
+	     history). mck-welcome-pdf.sh does its own logging to a
+	     user-writable path plus the unified logging system, so nothing
+	     here needs launchd's own stdout/stderr capture. -->
+</dict>
+</plist>

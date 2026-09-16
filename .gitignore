@@ -1,3 +1,4 @@
 .DS_Store
 packaging/build/
 packaging/dist/
+packaging/build-pdf/
