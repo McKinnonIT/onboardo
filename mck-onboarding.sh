@@ -144,6 +144,11 @@ DIALOG_COMMAND_FILE="/var/tmp/mck-onboarding-command-$$.log"
 # Own marker (separate from $MARKER_FILE above): bump the year in
 # DOCK_MARKER_FILE to reset every user's Dock for a relayout without
 # forcing the whole onboarding flow to re-run.
+#
+# Don't also deploy mck-dock-config.sh (the standalone Custom Script
+# version) on the same fleet as this — that one has no marker at all and
+# reconfigures the Dock on every login, which will fight this one-time
+# step and undo any rearranging a student's done since their first login.
 DOCKUTIL_BIN="/usr/local/bin/dockutil"
 DOCK_MARKER_DIR="${CONSOLE_USER_HOME}/Library/Application Support/McKinnonIT"
 DOCK_MARKER_FILE="${DOCK_MARKER_DIR}/DockConfigured-2026"

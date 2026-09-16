@@ -75,6 +75,11 @@ LOGGER_TAG="com.mckinnonsc.welcomepdf"
 # doesn't wait/poll for Chrome first — this pkg is for fleets that don't
 # need the full app-install gate, so it just configures what's already
 # there at the time dockutil itself becomes available.
+#
+# Don't also deploy mck-dock-config.sh (the standalone Custom Script
+# version) on the same fleet as this — that one has no marker at all and
+# reconfigures the Dock on every login, which will fight this one-time
+# step and undo any rearranging a student's done since their first login.
 DOCKUTIL_BIN="/usr/local/bin/dockutil"
 DOCK_MARKER_DIR="${CONSOLE_USER_HOME}/Library/Application Support/McKinnonIT"
 DOCK_MARKER_FILE="${DOCK_MARKER_DIR}/DockConfigured-2026"
